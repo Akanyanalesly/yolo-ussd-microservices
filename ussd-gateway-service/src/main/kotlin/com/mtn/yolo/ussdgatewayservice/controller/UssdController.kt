@@ -9,6 +9,7 @@ import com.mtn.yolo.ussdgatewayservice.service.UssdSessionService
 import org.springframework.http.HttpHeaders
 import org.springframework.http.MediaType
 import org.springframework.http.ResponseEntity
+import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.RequestParam
 import org.springframework.web.bind.annotation.RestController
@@ -22,13 +23,39 @@ class UssdController(
     private val ussdSessionService: UssdSessionService
 ) {
 
-    @PostMapping("/ussd", produces = [MediaType.TEXT_PLAIN_VALUE])
+    @PostMapping(
+        "/ussd",
+        consumes = [MediaType.APPLICATION_FORM_URLENCODED_VALUE],
+        produces = [MediaType.TEXT_PLAIN_VALUE]
+    )
     fun handleUssd(
         @RequestParam requestId: String,
         @RequestParam(required = false, defaultValue = "") sessionId: String,
         @RequestParam phoneNumber: String,
         @RequestParam text: String,
         @RequestParam(required = false) serviceCode: String?
+    ): ResponseEntity<String> = handleUssdRequest(requestId, sessionId, phoneNumber, text, serviceCode)
+
+    @PostMapping(
+        "/ussd",
+        consumes = [MediaType.APPLICATION_XML_VALUE, MediaType.TEXT_XML_VALUE],
+        produces = [MediaType.TEXT_PLAIN_VALUE]
+    )
+    fun handleUssdXml(@RequestBody request: UssdXmlRequest): ResponseEntity<String> =
+        handleUssdRequest(
+            requestId = request.requestId,
+            sessionId = request.sessionId ?: "",
+            phoneNumber = request.phoneNumber,
+            text = request.text ?: "",
+            serviceCode = request.serviceCode
+        )
+
+    private fun handleUssdRequest(
+        requestId: String,
+        sessionId: String,
+        phoneNumber: String,
+        text: String,
+        serviceCode: String?
     ): ResponseEntity<String> {
         val normalizedRequestId = requestId.trim()
         val normalizedSessionId = sessionId.trim()

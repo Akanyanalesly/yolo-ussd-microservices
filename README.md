@@ -91,6 +91,24 @@ curl -X POST http://localhost:8080/ussd \
 - `text="0*1"` (payment menu), `text="0*1*2"` (pay via MoMo — actually calls payment-service and
   returns its real response).
 
+### XML USSD requests
+
+The gateway also accepts XML at the same endpoint. Send a `POST` request to
+`http://localhost:8080/ussd`, set `Content-Type` to `application/xml`, and use:
+
+```xml
+<ussdRequest>
+    <requestId>1</requestId>
+    <sessionId>my-session-001</sessionId>
+    <phoneNumber>250780000000</phoneNumber>
+    <text></text>
+    <serviceCode>*154#</serviceCode>
+</ussdRequest>
+```
+
+For a later menu choice, use `requestId` `0`, keep the same `sessionId`, and set `text` to the
+chosen option, for example `<text>0</text>`.
+
 The gateway manages the full menu structure, including English/Kinyarwanda language selection,
 invalid-option messages, unfinished-session resume prompts, balance check, YOLO Star, and payment
 menus. Bundle selections are retrieved from `bundle-service`, while Airtime, MoMo, and Ihereze
