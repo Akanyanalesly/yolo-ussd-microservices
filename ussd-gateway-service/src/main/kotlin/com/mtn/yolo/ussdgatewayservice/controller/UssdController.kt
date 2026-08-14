@@ -39,16 +39,104 @@ class UssdController(
     @PostMapping(
         "/ussd",
         consumes = [MediaType.APPLICATION_XML_VALUE, MediaType.TEXT_XML_VALUE],
-        produces = [MediaType.TEXT_PLAIN_VALUE]
+        produces = [MediaType.APPLICATION_XML_VALUE]
     )
-    fun handleUssdXml(@RequestBody request: UssdXmlRequest): ResponseEntity<String> =
-        handleUssdRequest(
-            requestId = request.requestId,
-            sessionId = request.sessionId ?: "",
-            phoneNumber = request.phoneNumber,
-            text = request.text ?: "",
-            serviceCode = request.serviceCode
-        )
+    fun handleUssdXml(@RequestBody request: UssdXmlRequest): ResponseEntity<UssdXmlResponse> {
+        // Map XML request fields to internal format
+        val requestId = request.newRequest ?: "1"
+        val sessionId = request.sessionid ?: ""
+        val phoneNumber = request.msisdn
+        val text = request.input ?: ""
+        
+        val normalizedRequestId = requestId.trim()
+        val normalizedSessionId = sessionId.trim()
+        val normalizedPhoneNumber = phoneNumber.trim()
+
+        // Validate request
+        validateRequest(normalizedRequestId, normalizedSessionId, normalizedPhoneNumber)?.let { error ->
+            return ResponseEntity.badRequest()
+                .body(UssdXmlResponse(
+                    applicationResponse = "END Invalid request: $error",
+                    freeflow = ResponseFreeflow(freeflowState = "FE")
+                ))
+        }
+
+        val appSessionId: String
+        val inputs: List<String>
+
+        when (normalizedRequestId) {
+            "1" -> {
+                if (normalizedSessionId.isNotBlank()) {
+                    if (ussdSessionService.isSessionIdInUse(normalizedSessionId)) {
+                        return ResponseEntity.ok(UssdXmlResponse(
+                            applicationResponse = "END sessionId is already in use. Choose a unique sessionId.",
+                            freeflow = ResponseFreeflow(freeflowState = "FE")
+                        ))
+                    }
+                }
+                val session = ussdSessionService.createSession(normalizedPhoneNumber, normalizedSessionId)
+                appSessionId = session.id
+
+                val unfinished = ussdSessionService.getUnfinishedSession(normalizedPhoneNumber, appSessionId)
+                if (unfinished != null) {
+                    ussdSessionService.setLanguage(appSessionId, unfinished.language)
+                    ussdSessionService.replaceInputs(appSessionId, listOf("__resume__") + unfinished.inputs)
+                    return ResponseEntity.ok(UssdXmlResponse(
+                        applicationResponse = resumePrompt(unfinished.language).removePrefix("CON "),
+                        freeflow = ResponseFreeflow(freeflowState = "FC")
+                    ))
+                }
+                inputs = emptyList()
+            }
+            "0" -> {
+                val session = ussdSessionService.getSession(normalizedSessionId)
+                if (session == null || session.msisdn != normalizedPhoneNumber) {
+                    return ResponseEntity.ok(UssdXmlResponse(
+                        applicationResponse = "END Your session has expired or is invalid. Please dial *154# to start a new session.",
+                        freeflow = ResponseFreeflow(freeflowState = "FE")
+                    ))
+                }
+                appSessionId = session.id
+
+                inputs = if (text.isBlank()) {
+                    ussdSessionService.replaceInputs(appSessionId, emptyList())
+                    emptyList()
+                } else if (text.contains("*")) {
+                    val parts = text.split("*")
+                    ussdSessionService.replaceInputs(appSessionId, parts)
+                    parts
+                } else {
+                    val path = session.inputs
+                    path.add(text.trim())
+                    ussdSessionService.replaceInputs(appSessionId, path)
+                    path.toList()
+                }
+            }
+            else -> {
+                return ResponseEntity.ok(UssdXmlResponse(
+                    applicationResponse = "END Invalid request. Please dial *154# to start again.",
+                    freeflow = ResponseFreeflow(freeflowState = "FE")
+                ))
+            }
+        }
+
+        val response = buildResponse(appSessionId, normalizedPhoneNumber, inputs)
+        if (response.startsWith("END")) {
+            ussdSessionService.endSession(appSessionId, natural = true)
+        }
+
+        // Parse response to determine state
+        val freeflowState = when {
+            response.startsWith("CON") -> "FC"
+            response.startsWith("END") -> "FE"
+            else -> "FC"
+        }
+        
+        return ResponseEntity.ok(UssdXmlResponse(
+            applicationResponse = response.removePrefix("CON ").removePrefix("END "),
+            freeflow = ResponseFreeflow(freeflowState = freeflowState)
+        ))
+    }
 
     private fun handleUssdRequest(
         requestId: String,
