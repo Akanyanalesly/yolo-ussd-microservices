@@ -3,13 +3,20 @@ package com.mtn.yolo.ussdgatewayservice.controller
 import com.mtn.yolo.ussdgatewayservice.client.BundleServiceClient
 import com.mtn.yolo.ussdgatewayservice.client.PaymentServiceClient
 import com.mtn.yolo.ussdgatewayservice.dto.BundleDto
+import com.mtn.yolo.ussdgatewayservice.dto.AskRequest
+import com.mtn.yolo.ussdgatewayservice.dto.AskResponse
+import com.mtn.yolo.ussdgatewayservice.dto.ChatButton
+import com.mtn.yolo.ussdgatewayservice.dto.MenuNavigateRequest
+import com.mtn.yolo.ussdgatewayservice.dto.MenuNavigateResponse
 import com.mtn.yolo.ussdgatewayservice.dto.PaymentRequestDto
 import com.mtn.yolo.ussdgatewayservice.model.UssdLanguage
+import com.mtn.yolo.ussdgatewayservice.service.FaqService
 import com.mtn.yolo.ussdgatewayservice.service.UssdSessionService
 import org.springframework.http.HttpHeaders
 import org.springframework.http.MediaType
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.RequestBody
+import org.springframework.web.bind.annotation.CrossOrigin
 import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.RequestParam
 import org.springframework.web.bind.annotation.RestController
@@ -20,8 +27,94 @@ import java.time.LocalDate
 class UssdController(
     private val bundleServiceClient: BundleServiceClient,
     private val paymentServiceClient: PaymentServiceClient,
-    private val ussdSessionService: UssdSessionService
+    private val ussdSessionService: UssdSessionService,
+    private val faqService: FaqService
 ) {
+
+    @CrossOrigin(origins = ["*"])
+    @PostMapping(
+        "/api/menu/navigate",
+        consumes = [MediaType.APPLICATION_JSON_VALUE],
+        produces = [MediaType.APPLICATION_JSON_VALUE]
+    )
+    fun navigateMenu(@RequestBody request: MenuNavigateRequest): ResponseEntity<MenuNavigateResponse> {
+        val sessionId = request.sessionId.trim()
+        if (sessionId.isBlank()) {
+            return ResponseEntity.badRequest().body(
+                MenuNavigateResponse(sessionId = "", message = "A session ID is required.", isEnd = true)
+            )
+        }
+
+        // A unique synthetic MSISDN keeps independent browser chats from closing each other.
+        val phoneNumber = request.phoneNumber?.trim()?.takeIf { it.isNotBlank() } ?: chatMsisdn(sessionId)
+        val existingSession = ussdSessionService.getSession(sessionId)
+        val inputs = if (existingSession == null) {
+            // A new browser conversation may belong to a user who left the previous
+            // one unfinished. Preserve the familiar USSD resume choice for the chat UI.
+            ussdSessionService.createSession(phoneNumber, sessionId)
+            val unfinished = ussdSessionService.getUnfinishedSession(phoneNumber, sessionId)
+            if (unfinished != null) {
+                ussdSessionService.setLanguage(sessionId, unfinished.language)
+                val resumeInputs = listOf("__resume__") + unfinished.inputs + "__resume_choice__"
+                ussdSessionService.replaceInputs(sessionId, resumeInputs)
+                resumeInputs
+            } else {
+                emptyList()
+            }
+        } else if (request.input.equals("START", ignoreCase = true)) {
+            // A page refresh sends START again. Keep the current conversation intact.
+            existingSession.inputs.toList()
+        } else {
+            val updatedInputs = existingSession.inputs.toList() + request.input.trim()
+            ussdSessionService.replaceInputs(sessionId, updatedInputs)
+            updatedInputs
+        }
+
+        val raw = buildResponse(sessionId, phoneNumber, inputs)
+        if (raw.startsWith("END")) ussdSessionService.endSession(sessionId, natural = true)
+        return ResponseEntity.ok(parseToChatResponse(sessionId, raw))
+    }
+
+    @CrossOrigin(origins = ["*"])
+    @PostMapping(
+        "/chat/ask",
+        consumes = [MediaType.APPLICATION_JSON_VALUE],
+        produces = [MediaType.APPLICATION_JSON_VALUE]
+    )
+    fun askChat(@RequestBody request: AskRequest): AskResponse =
+        AskResponse(sessionId = request.sessionId.trim(), message = faqService.findAnswer(request.input))
+
+    private fun chatMsisdn(sessionId: String): String {
+        val suffix = (sessionId.hashCode().toUInt().toLong() % 10_000_000).toString().padStart(7, '0')
+        return "078$suffix"
+    }
+
+    private fun parseToChatResponse(sessionId: String, raw: String): MenuNavigateResponse {
+        val isEnd = raw.startsWith("END")
+        val body = raw.removePrefix("CON ").removePrefix("END ")
+        val optionRegex = Regex("^(\\d+|n)\\)(.+)$")
+        val buttons = mutableListOf<ChatButton>()
+        val messageLines = mutableListOf<String>()
+
+        body.split("\n").forEach { line ->
+            val trimmed = line.trim()
+            val match = optionRegex.find(trimmed)
+            if (match != null) {
+                val (value, label) = match.destructured
+                buttons.add(ChatButton(label = label.trim(), value = value))
+            } else if (trimmed.isNotEmpty()) {
+                messageLines.add(trimmed)
+            }
+        }
+
+        return MenuNavigateResponse(
+            sessionId = sessionId,
+            message = messageLines.joinToString("\n"),
+            buttons = buttons,
+            isEnd = isEnd,
+            inputType = if (!isEnd && buttons.isEmpty()) "FREE_TEXT" else "BUTTONS"
+        )
+    }
 
     @PostMapping(
         "/ussd",
@@ -80,7 +173,7 @@ class UssdController(
                 val unfinished = ussdSessionService.getUnfinishedSession(normalizedPhoneNumber, appSessionId)
                 if (unfinished != null) {
                     ussdSessionService.setLanguage(appSessionId, unfinished.language)
-                    ussdSessionService.replaceInputs(appSessionId, listOf("__resume__") + unfinished.inputs)
+                    ussdSessionService.replaceInputs(appSessionId, listOf("__resume__") + unfinished.inputs + "__resume_choice__")
                     return ResponseEntity.ok(UssdXmlResponse(
                         applicationResponse = resumePrompt(unfinished.language).removePrefix("CON "),
                         freeflow = ResponseFreeflow(freeflowState = "FC")
@@ -170,7 +263,7 @@ class UssdController(
                 if (unfinished != null) {
                     // A resumed conversation keeps the language the customer had selected.
                     ussdSessionService.setLanguage(appSessionId, unfinished.language)
-                    ussdSessionService.replaceInputs(appSessionId, listOf("__resume__") + unfinished.inputs)
+                    ussdSessionService.replaceInputs(appSessionId, listOf("__resume__") + unfinished.inputs + "__resume_choice__")
                     val headers = HttpHeaders()
                     headers.contentType = MediaType.TEXT_PLAIN
                     headers.add("X-USSD-Session-Id", appSessionId)
@@ -246,17 +339,16 @@ class UssdController(
     private fun buildResponse(sessionId: String, phoneNumber: String, inputs: List<String>): String {
         // Handle resume prompt — inputs[0] == "__resume__" means we're waiting for 1 or 2
         if (inputs.isNotEmpty() && inputs[0] == "__resume__") {
-            val savedInputs = inputs.drop(1) // everything after the marker is the saved path
-            if (savedInputs.isEmpty() || inputs.size == 1) {
-                // Still on the prompt screen (first display)
-                return resumePrompt(languageFor(sessionId))
-            }
-            return when (savedInputs.last()) {
+            val choiceMarkerIndex = inputs.indexOf("__resume_choice__")
+            if (choiceMarkerIndex == -1) return resumePrompt(languageFor(sessionId))
+            val savedInputs = inputs.subList(1, choiceMarkerIndex)
+            val choice = inputs.getOrNull(choiceMarkerIndex + 1)
+            if (choice == null) return resumePrompt(languageFor(sessionId))
+            return when (choice) {
                 "1" -> {
                     // User chose resume — savedInputs minus the "1" choice = actual path
-                    val restoredInputs = savedInputs.dropLast(1)
-                    ussdSessionService.replaceInputs(sessionId, restoredInputs)
-                    buildResponse(sessionId, phoneNumber, restoredInputs)
+                    ussdSessionService.replaceInputs(sessionId, savedInputs)
+                    buildResponse(sessionId, phoneNumber, savedInputs)
                 }
                 "2" -> {
                     ussdSessionService.replaceInputs(sessionId, emptyList())

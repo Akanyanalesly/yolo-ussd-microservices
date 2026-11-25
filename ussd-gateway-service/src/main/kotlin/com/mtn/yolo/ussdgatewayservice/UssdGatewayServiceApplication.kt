@@ -39,7 +39,9 @@ class UssdGatewayServiceApplication {
     private fun clientHttpRequestFactory(): ClientHttpRequestFactory {
         val factory = SimpleClientHttpRequestFactory()
         factory.setConnectTimeout(5000)
-        factory.setReadTimeout(5000)
+        // The first request to a Spring service can take longer while it initializes.
+        // Allow enough time for local MySQL-backed bundle and payment lookups.
+        factory.setReadTimeout(15_000)
         return BufferingClientHttpRequestFactory(factory)
     }
 }

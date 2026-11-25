@@ -52,6 +52,20 @@ Open each service folder separately in IntelliJ (`File → Open`, pointing at th
 `payment-service`, or `ussd-gateway-service` folder) — IntelliJ detects `build.gradle.kts`
 automatically and imports the Gradle project, same as it did with `pom.xml` before.
 
+## Optional chat frontend
+
+The `chat-frontend` folder contains a React chat interface for the USSD menu and FAQ questions.
+Start the three backend services as described above, then run the frontend in a separate terminal:
+
+```bash
+cd chat-frontend
+npm install
+npm run dev
+```
+
+By default, the frontend connects to the gateway at `http://localhost:8080`. Its menu uses
+`POST /api/menu/navigate`, and its FAQ uses `POST /chat/ask`.
+
 ## Testing the CRUD APIs directly
 
 **bundle-service** (`http://localhost:8081/api/bundles`):
